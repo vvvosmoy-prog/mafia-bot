@@ -1,5 +1,8 @@
+
 import os
 import logging
+import threading
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -10,6 +13,22 @@ from telegram.ext import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ==== ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ====
+# Render бесплатно держит только "веб-сервисы", которые отвечают на HTTP-запросы.
+# Этот мини-сервер существует только чтобы Render считал бота "сайтом" и не убивал процесс,
+# а внешний пингер (UptimeRobot) будет стучаться сюда каждые 5 минут, чтобы Render не усыплял его.
+flask_app = Flask(__name__)
+
+
+@flask_app.route("/")
+def home():
+    return "Bot is alive"
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  # токен подставляется через переменную окружения
@@ -137,6 +156,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
+
+    # запускаем фейковый веб-сервер в отдельном потоке, чтобы Render видел "живой сайт"
+    threading.Thread(target=run_flask, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
