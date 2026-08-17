@@ -1,4 +1,3 @@
-
 import os
 import logging
 import threading
@@ -70,6 +69,11 @@ def render_text(players: dict, threshold: int, closed: bool = False) -> str:
 
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    # сообщения, опубликованные от имени канала (а не от личного аккаунта),
+    # не содержат данных об отправителе - но постить в канал может только админ,
+    # поэтому такие сообщения считаем доверенными
+    if update.effective_user is None:
+        return True
     user_id = update.effective_user.id
     if ADMIN_IDS:
         return user_id in ADMIN_IDS
