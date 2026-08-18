@@ -26,6 +26,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
 
+
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DEFAULT_THRESHOLD = 10
@@ -37,7 +38,9 @@ active_sessions = {}
 
 def build_keyboard(closed: bool = False) -> InlineKeyboardMarkup:
     if closed:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("Сбор завершён", callback_data="noop")]])
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Сбор завершён", callback_data="noop")]]
+        )
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("Я в деле ✅", callback_data="join")]]
     )
@@ -70,7 +73,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not msg:
         return False
 
-    # 1. Если сообщение отправлено от имени канала или переслано из привязанного канала
+    # Если сообщение пришло из канала или это анонимный пост канала
     if msg.sender_chat or msg.is_automatic_forward:
         return True
 
@@ -78,24 +81,25 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not user:
         return True
 
-    # 2. Если сообщение отправлено анонимным администратором группы (Telegram-бот 1087968824 или 777000)
+    # Анонимные админы Telegram
     if user.id in (1087968824, 777000):
         return True
 
-    # 3. Проверка по списку ADMIN_IDS из переменных окружения
+    # Список ADMIN_IDS из Render
     if ADMIN_IDS and user.id in ADMIN_IDS:
         return True
 
-    # 4. Проверка реальных прав администратора/создателя в самом чате Telegram
+    # Проверка реальных прав администратора/создателя в группе
     if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
         try:
-            member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
+            member = await context.bot.get_chat_member(
+                update.effective_chat.id, user.id
+            )
             if member.status in ("administrator", "creator"):
                 return True
         except Exception as e:
-            logger.error(f"Ошибка при проверке прав участника: {e}")
+            logger.error(f"Ошибка проверки прав: {e}")
 
-    # Если задан ADMIN_IDS и ни одна проверка не прошла — отклоняем
     if ADMIN_IDS:
         return False
 
@@ -104,8 +108,18 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /newgame [число] — запускает новый сбор."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    # Игнорируем авто-копию поста, которая Telegram создаёт в чате обсуждений,
+    # чтобы опросник публиковался только там, откуда отправлен оригинал (в Канале).
+    if msg.is_automatic_forward:
+        return
+
     if not await is_admin(update, context):
-        await update.message.reply_text("Эта команда только для админов.")
+        if update.message:
+            await update.message.reply_text("Эта команда только для админов.")
         return
 
     threshold = DEFAULT_THRESHOLD
@@ -117,13 +131,14 @@ async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     players = {}
     text = render_text(players, threshold)
-    msg = await context.bot.send_message(
+
+    sent_msg = await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=text,
         reply_markup=build_keyboard(),
     )
-    active_sessions[msg.message_id] = {
-        "chat_id": msg.chat_id,
+    active_sessions[sent_msg.message_id] = {
+        "chat_id": sent_msg.chat_id,
         "players": players,
         "threshold": threshold,
         "closed": False,
@@ -169,11 +184,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Я бот для сбора игроков в мафию.\n\n"
-        "Команда /newgame — запустить новый сбор (по умолчанию порог 10 человек).\n"
-        "Пример: /newgame 8 — запустить сбор на 8 человек."
-    )
+    if update.message:
+        await update.message.reply_text(
+            "Привет! Я бот для сбора игроков в мафию.\n\n"
+            "Команда /newgame — запустить новый сбор (по умолчанию порог 10 человек).\n"
+            "Пример: /newgame 8 — запустить сбор на 8 человек."
+        )
 
 
 def main():
@@ -189,7 +205,6 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Бот запущен")
-    # Передаем типы сообщений напрямую в run_polling:
     app.run_polling(allowed_updates=["message", "channel_post", "callback_query"])
 
 
