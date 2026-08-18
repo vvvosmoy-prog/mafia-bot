@@ -14,9 +14,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==== ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ====
-# Render бесплатно держит только "веб-сервисы", которые отвечают на HTTP-запросы.
-# Этот мини-сервер существует только чтобы Render считал бота "сайтом" и не убивал процесс,
-# а внешний пингер (UptimeRobot) будет стучаться сюда каждые 5 минут, чтобы Render не усыплял его.
 flask_app = Flask(__name__)
 
 
@@ -30,11 +27,11 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port)
 
 # ==== НАСТРОЙКИ ====
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # токен подставляется через переменную окружения
-DEFAULT_THRESHOLD = 10  # сколько человек нужно для старта сбора
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+DEFAULT_THRESHOLD = 10
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
-# Хранилище активных сборов: {message_id: {"chat_id":.., "players": {}, "threshold":.., "closed": bool}}
+# Хранилище активных сборов
 active_sessions = {}
 
 
@@ -69,21 +66,44 @@ def render_text(players: dict, threshold: int, closed: bool = False) -> str:
 
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    # сообщения, опубликованные от имени канала (а не от личного аккаунта),
-    # не содержат данных об отправителе - но постить в канал может только админ,
-    # поэтому такие сообщения считаем доверенными
-    if update.effective_user is None:
+    msg = update.effective_message
+    if not msg:
+        return False
+
+    # 1. Если сообщение отправлено от имени канала или переслано из привязанного канала
+    if msg.sender_chat or msg.is_automatic_forward:
         return True
-    user_id = update.effective_user.id
+
+    user = update.effective_user
+    if not user:
+        return True
+
+    # 2. Если сообщение отправлено анонимным администратором группы (Telegram-бот 1087968824 или 777000)
+    if user.id in (1087968824, 777000):
+        return True
+
+    # 3. Проверка по списку ADMIN_IDS из переменных окружения
+    if ADMIN_IDS and user.id in ADMIN_IDS:
+        return True
+
+    # 4. Проверка реальных прав администратора/создателя в самом чате Telegram
+    if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        try:
+            member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
+            if member.status in ("administrator", "creator"):
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка при проверке прав участника: {e}")
+
+    # Если задан ADMIN_IDS и ни одна проверка не прошла — отклоняем
     if ADMIN_IDS:
-        return user_id in ADMIN_IDS
-    # если список админов не задан - разрешаем всем (упрощённый режим)
+        return False
+
     return True
 
 
 async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /newgame [число] - запускает новый сбор. Использовать в канале как админ-пост,
-    либо в группе - командой от админа."""
+    """Команда /newgame [число] — запускает новый сбор."""
     if not await is_admin(update, context):
         await update.message.reply_text("Эта команда только для админов.")
         return
@@ -123,7 +143,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display = f"@{user.username}" if user.username else user.first_name
 
     if user.id in session["players"]:
-        # повторное нажатие - выходит из списка
         del session["players"][user.id]
         await query.answer("Ты вышел из сбора.")
     else:
@@ -161,10 +180,16 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
 
-    # запускаем фейковый веб-сервер в отдельном потоке, чтобы Render видел "живой сайт"
     threading.Thread(target=run_flask, daemon=True).start()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Разрешаем обработку сообщений из каналов, обычных чатов и нажатий на кнопки
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .allowed_updates(["message", "channel_post", "callback_query"])
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newgame", newgame))
     app.add_handler(CallbackQueryHandler(button_handler))
