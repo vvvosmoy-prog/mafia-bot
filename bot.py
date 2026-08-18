@@ -6,9 +6,10 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -70,6 +71,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not msg:
         return False
 
+    # Сообщения, опубликованные напрямую в канале, всегда считаем админскими
     if update.effective_chat and update.effective_chat.type == "channel":
         return True
 
@@ -102,13 +104,12 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return True
 
 
-async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /newgame [число] — запускает новый сбор."""
+async def handle_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if not msg:
+    if not msg or not msg.text:
         return
 
-    # Игнорируем авто-пересылку из канала в чат
+    # Игнорируем копию поста, которая Telegram автоматически отправляет в чат обсуждений
     if msg.is_automatic_forward:
         return
 
@@ -117,27 +118,38 @@ async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Эта команда только для админов.")
         return
 
-    # Удаляем исходный текст команды в канале для чистоты
-    if update.effective_chat and update.effective_chat.type == "channel":
-        try:
-            await msg.delete()
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение команды: {e}")
-
+    # Извлекаем количество игроков (/newgame или /newgame 8)
+    parts = msg.text.strip().split()
     threshold = DEFAULT_THRESHOLD
-    if context.args:
+    if len(parts) > 1:
         try:
-            threshold = int(context.args[0])
+            threshold = int(parts[1])
         except ValueError:
             pass
 
+    # Сначала публикуем опросник
     text = render_text(names=[], threshold=threshold)
-
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=text,
         reply_markup=build_keyboard(),
     )
+
+    # Затем удаляем исходное сообщение с командой
+    try:
+        await msg.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить текст команды: {e}")
+
+
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text(
+            "Привет! Я бот для сбора игроков в мафию.\n\n"
+            "Команда /newgame — запустить новый сбор (по умолчанию 10 человек).\n"
+            "Пример: /newgame 8 — запустить сбор на 8 человек."
+        )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,11 +163,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_text = query.message.text or ""
 
-    # Извлекаем нужное число игроков
+    # Извлекаем лимит участников из текста сообщения
     threshold_match = re.search(r"Нужно игроков:\s*(\d+)", current_text)
     threshold = int(threshold_match.group(1)) if threshold_match else DEFAULT_THRESHOLD
 
-    # Считываем текущий список участников прямо из текста сообщения
+    # Считываем текущих участников
     names = []
     for line in current_text.split("\n"):
         line = line.strip()
@@ -176,27 +188,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     closed = len(names) >= threshold
     new_text = render_text(names=names, threshold=threshold, closed=closed)
 
-    # Обновляем текст и кнопку в сообщении
     await query.edit_message_text(
         text=new_text,
         reply_markup=build_keyboard(closed=closed),
     )
 
-    # Уведомление при полном сборе
     if closed:
         mentions = ", ".join(names)
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=f"🚨 Собралось {threshold} человек! Го в лобби: {mentions}",
-        )
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "Привет! Я бот для сбора игроков в мафию.\n\n"
-            "Команда /newgame — запустить новый сбор (по умолчанию 10 человек).\n"
-            "Пример: /newgame 8 — запустить сбор на 8 человек."
         )
 
 
@@ -208,8 +209,10 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("newgame", newgame))
+    # Использование MessageHandler с регулярным выражением вместо CommandHandler
+    # позволяет перехватывать команды и из обычных чатов, и из публикаций каналов.
+    app.add_handler(MessageHandler(filters.Regex(r"^/start"), handle_start))
+    app.add_handler(MessageHandler(filters.Regex(r"^/newgame"), handle_newgame))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Бот запущен")
