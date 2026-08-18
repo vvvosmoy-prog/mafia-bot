@@ -73,23 +73,19 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not msg:
         return False
 
-    # Если сообщение пришло из канала или это анонимный пост канала
-    if msg.sender_chat or msg.is_automatic_forward:
+    if msg.sender_chat or msg.is_automatic_forward or update.effective_chat.type == "channel":
         return True
 
     user = update.effective_user
     if not user:
         return True
 
-    # Анонимные админы Telegram
     if user.id in (1087968824, 777000):
         return True
 
-    # Список ADMIN_IDS из Render
     if ADMIN_IDS and user.id in ADMIN_IDS:
         return True
 
-    # Проверка реальных прав администратора/создателя в группе
     if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
         try:
             member = await context.bot.get_chat_member(
@@ -112,8 +108,7 @@ async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    # Игнорируем авто-копию поста, которая Telegram создаёт в чате обсуждений,
-    # чтобы опросник публиковался только там, откуда отправлен оригинал (в Канале).
+    # Игнорируем авто-дубликат, падающий в чат обсуждений из канала
     if msg.is_automatic_forward:
         return
 
@@ -132,17 +127,29 @@ async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     players = {}
     text = render_text(players, threshold)
 
-    sent_msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text,
-        reply_markup=build_keyboard(),
-    )
-    active_sessions[sent_msg.message_id] = {
-        "chat_id": sent_msg.chat_id,
-        "players": players,
-        "threshold": threshold,
-        "closed": False,
-    }
+    try:
+        # Публикуем опросник прямо в место вызова (в Канал)
+        sent_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=build_keyboard(),
+        )
+        active_sessions[sent_msg.message_id] = {
+            "chat_id": sent_msg.chat_id,
+            "players": players,
+            "threshold": threshold,
+            "closed": False,
+        }
+
+        # Если команда отправлена в канале, стираем текст /newgame
+        if update.effective_chat.type == "channel":
+            try:
+                await msg.delete()
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение команды в канале: {e}")
+
+    except Exception as e:
+        logger.error(f"Ошибка отправки опросника: {e}")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
