@@ -41,7 +41,12 @@ def build_keyboard(closed: bool = False) -> InlineKeyboardMarkup:
             [[InlineKeyboardButton("Сбор завершён", callback_data="noop")]]
         )
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Я в деле ✅", callback_data="join")]]
+        [
+            [
+                InlineKeyboardButton("Я в деле ✅", callback_data="join"),
+                InlineKeyboardButton("Отмена ❌", callback_data="leave"),
+            ]
+        ]
     )
 
 
@@ -71,7 +76,6 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not msg:
         return False
 
-    # Сообщения, опубликованные напрямую в канале, всегда считаем админскими
     if update.effective_chat and update.effective_chat.type == "channel":
         return True
 
@@ -109,7 +113,6 @@ async def handle_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         return
 
-    # Игнорируем копию поста, которая Telegram автоматически отправляет в чат обсуждений
     if msg.is_automatic_forward:
         return
 
@@ -118,7 +121,6 @@ async def handle_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Эта команда только для админов.")
         return
 
-    # Извлекаем количество игроков (/newgame или /newgame 8)
     parts = msg.text.strip().split()
     threshold = DEFAULT_THRESHOLD
     if len(parts) > 1:
@@ -127,7 +129,6 @@ async def handle_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
 
-    # Сначала публикуем опросник
     text = render_text(names=[], threshold=threshold)
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -135,7 +136,6 @@ async def handle_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_keyboard(),
     )
 
-    # Затем удаляем исходное сообщение с командой
     try:
         await msg.delete()
     except Exception as e:
@@ -163,11 +163,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_text = query.message.text or ""
 
-    # Извлекаем лимит участников из текста сообщения
     threshold_match = re.search(r"Нужно игроков:\s*(\d+)", current_text)
     threshold = int(threshold_match.group(1)) if threshold_match else DEFAULT_THRESHOLD
 
-    # Считываем текущих участников
     names = []
     for line in current_text.split("\n"):
         line = line.strip()
@@ -177,13 +175,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     display = f"@{user.username}" if user.username else user.first_name
 
-    # Добавляем или удаляем пользователя
-    if display in names:
-        names.remove(display)
-        await query.answer("Ты вышел из сбора.")
-    else:
+    # Обработка нажатия "Я в деле ✅"
+    if query.data == "join":
+        if display in names:
+            await query.answer("Ты уже записан на этот сбор!", show_alert=True)
+            return
         names.append(display)
         await query.answer("Записал тебя!")
+
+    # Обработка нажатия "Отмена ❌"
+    elif query.data == "leave":
+        if display not in names:
+            await query.answer("Тебя нет в списке этого сбора.", show_alert=True)
+            return
+        names.remove(display)
+        await query.answer("Ты вышел из сбора.")
 
     closed = len(names) >= threshold
     new_text = render_text(names=names, threshold=threshold, closed=closed)
@@ -209,8 +215,6 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Использование MessageHandler с регулярным выражением вместо CommandHandler
-    # позволяет перехватывать команды и из обычных чатов, и из публикаций каналов.
     app.add_handler(MessageHandler(filters.Regex(r"^/start"), handle_start))
     app.add_handler(MessageHandler(filters.Regex(r"^/newgame"), handle_newgame))
     app.add_handler(CallbackQueryHandler(button_handler))
