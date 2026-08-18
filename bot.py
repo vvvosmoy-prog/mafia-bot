@@ -142,6 +142,19 @@ async def handle_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Не удалось удалить текст команды: {e}")
 
 
+async def auto_delete_forward_in_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет автокопию карточки сбора из чата обсуждений."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    if msg.is_automatic_forward and msg.text and "🕵️‍♂️ СБОР НА МАФИЮ 🔪" in msg.text:
+        try:
+            await msg.delete()
+        except Exception as e:
+            logger.warning(f"Не удалось удалить копию сбора из чата: {e}")
+
+
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg:
@@ -175,7 +188,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     display = f"@{user.username}" if user.username else user.first_name
 
-    # Обработка нажатия "Я в деле ✅"
     if query.data == "join":
         if display in names:
             await query.answer("Ты уже записан на этот сбор!", show_alert=True)
@@ -183,7 +195,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         names.append(display)
         await query.answer("Записал тебя!")
 
-    # Обработка нажатия "Отмена ❌"
     elif query.data == "leave":
         if display not in names:
             await query.answer("Тебя нет в списке этого сбора.", show_alert=True)
@@ -214,6 +225,9 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Перехватчик автопересланных постов из канала в чат
+    app.add_handler(MessageHandler(filters.IS_AUTOMATIC_FORWARD, auto_delete_forward_in_chat))
 
     app.add_handler(MessageHandler(filters.Regex(r"^/start"), handle_start))
     app.add_handler(MessageHandler(filters.Regex(r"^/newgame"), handle_newgame))
