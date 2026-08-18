@@ -1,12 +1,14 @@
 import os
+import re
 import logging
 import threading
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
-    TypeHandler,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -29,9 +31,7 @@ def run_flask():
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DEFAULT_THRESHOLD = 10
-
-# Хранилище активных сборов
-active_sessions = {}
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
 
 def build_keyboard(closed: bool = False) -> InlineKeyboardMarkup:
@@ -44,13 +44,12 @@ def build_keyboard(closed: bool = False) -> InlineKeyboardMarkup:
     )
 
 
-def render_text(players: dict, threshold: int, closed: bool = False) -> str:
-    names = [p["display"] for p in players.values()]
+def render_text(names: list, threshold: int, closed: bool = False) -> str:
     lines = [
         "🕵️‍♂️ СБОР НА МАФИЮ 🔪",
         "",
         f"Нужно игроков: {threshold}",
-        f"Собралось: {len(players)}/{threshold}",
+        f"Собралось: {len(names)}/{threshold}",
         "",
     ]
     if names:
@@ -66,106 +65,139 @@ def render_text(players: dict, threshold: int, closed: bool = False) -> str:
     return "\n".join(lines)
 
 
-async def button_handler(query):
-    msg_id = query.message.message_id
-    session = active_sessions.get(msg_id)
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    msg = update.effective_message
+    if not msg:
+        return False
 
-    if not session or session["closed"]:
-        await query.answer("Этот сбор уже закрыт или не найден.", show_alert=True)
+    if update.effective_chat and update.effective_chat.type == "channel":
+        return True
+
+    if msg.sender_chat or msg.is_automatic_forward:
+        return True
+
+    user = update.effective_user
+    if not user:
+        return True
+
+    if user.id in (1087968824, 777000):
+        return True
+
+    if ADMIN_IDS and user.id in ADMIN_IDS:
+        return True
+
+    if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        try:
+            member = await context.bot.get_chat_member(
+                update.effective_chat.id, user.id
+            )
+            if member.status in ("administrator", "creator"):
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка проверки прав: {e}")
+
+    if ADMIN_IDS:
+        return False
+
+    return True
+
+
+async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /newgame [число] — запускает новый сбор."""
+    msg = update.effective_message
+    if not msg:
         return
+
+    # Игнорируем авто-пересылку из канала в чат
+    if msg.is_automatic_forward:
+        return
+
+    if not await is_admin(update, context):
+        if update.message:
+            await update.message.reply_text("Эта команда только для админов.")
+        return
+
+    # Удаляем исходный текст команды в канале для чистоты
+    if update.effective_chat and update.effective_chat.type == "channel":
+        try:
+            await msg.delete()
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение команды: {e}")
+
+    threshold = DEFAULT_THRESHOLD
+    if context.args:
+        try:
+            threshold = int(context.args[0])
+        except ValueError:
+            pass
+
+    text = render_text(names=[], threshold=threshold)
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=text,
+        reply_markup=build_keyboard(),
+    )
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.message:
+        return
+
+    if query.data == "noop":
+        await query.answer("Этот сбор уже завершён.", show_alert=True)
+        return
+
+    current_text = query.message.text or ""
+
+    # Извлекаем нужное число игроков
+    threshold_match = re.search(r"Нужно игроков:\s*(\d+)", current_text)
+    threshold = int(threshold_match.group(1)) if threshold_match else DEFAULT_THRESHOLD
+
+    # Считываем текущий список участников прямо из текста сообщения
+    names = []
+    for line in current_text.split("\n"):
+        line = line.strip()
+        if line.startswith("• "):
+            names.append(line[2:].strip())
 
     user = query.from_user
     display = f"@{user.username}" if user.username else user.first_name
 
-    if user.id in session["players"]:
-        del session["players"][user.id]
+    # Добавляем или удаляем пользователя
+    if display in names:
+        names.remove(display)
         await query.answer("Ты вышел из сбора.")
     else:
-        session["players"][user.id] = {"display": display}
+        names.append(display)
         await query.answer("Записал тебя!")
 
-    closed = len(session["players"]) >= session["threshold"]
-    session["closed"] = closed
+    closed = len(names) >= threshold
+    new_text = render_text(names=names, threshold=threshold, closed=closed)
 
-    text = render_text(session["players"], session["threshold"], closed)
-    await query.bot.edit_message_text(
-        chat_id=session["chat_id"],
-        message_id=msg_id,
-        text=text,
+    # Обновляем текст и кнопку в сообщении
+    await query.edit_message_text(
+        text=new_text,
         reply_markup=build_keyboard(closed=closed),
     )
 
+    # Уведомление при полном сборе
     if closed:
-        mentions = ", ".join(p["display"] for p in session["players"].values())
-        await query.bot.send_message(
-            chat_id=session["chat_id"],
-            text=f"🚨 Собралось {session['threshold']} человек! Го в лобби: {mentions}",
-        )
-
-
-async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Нажатие на кнопки
-    if update.callback_query:
-        await button_handler(update.callback_query)
-        return
-
-    # 2. Перехватываем сообщение из группы или публикацию из канала
-    msg = update.channel_post or update.message
-    if not msg or not msg.text:
-        return
-
-    # Игнорируем авто-дубликат поста, который Telegram шлёт в чат
-    if msg.is_automatic_forward:
-        return
-
-    text = msg.text.strip()
-
-    # Команда /start
-    if text.startswith("/start"):
+        mentions = ", ".join(names)
         await context.bot.send_message(
-            chat_id=msg.chat_id,
-            text="Привет! Я бот для сбора игроков в мафию.\n\n"
-                 "Команда /newgame — запустить новый сбор (по умолчанию 10 человек).\n"
-                 "Пример: /newgame 8 — запустить сбор на 8 человек.",
+            chat_id=query.message.chat_id,
+            text=f"🚨 Собралось {threshold} человек! Го в лобби: {mentions}",
         )
-        return
 
-    # Команда /newgame
-    if text.startswith("/newgame"):
-        parts = text.split()
-        threshold = DEFAULT_THRESHOLD
-        if len(parts) > 1:
-            try:
-                threshold = int(parts[1])
-            except ValueError:
-                pass
 
-        players = {}
-        rendered_text = render_text(players, threshold)
-
-        try:
-            # Публикуем интерактивную карточку в Канал
-            sent_msg = await context.bot.send_message(
-                chat_id=msg.chat_id,
-                text=rendered_text,
-                reply_markup=build_keyboard(),
-            )
-            active_sessions[sent_msg.message_id] = {
-                "chat_id": sent_msg.chat_id,
-                "players": players,
-                "threshold": threshold,
-                "closed": False,
-            }
-
-            # Если команда отправлена в канале — сразу удаляем текст /newgame
-            if msg.chat.type == "channel":
-                try:
-                    await msg.delete()
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить команду из канала: {e}")
-
-        except Exception as e:
-            logger.error(f"Ошибка при обработке /newgame: {e}")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "Привет! Я бот для сбора игроков в мафию.\n\n"
+            "Команда /newgame — запустить новый сбор (по умолчанию 10 человек).\n"
+            "Пример: /newgame 8 — запустить сбор на 8 человек."
+        )
 
 
 def main():
@@ -176,11 +208,12 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Перехватчик всех типов сообщений и постов каналов без потерь
-    app.add_handler(TypeHandler(Update, handle_update))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("newgame", newgame))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Бот запущен")
-    app.run_polling(allowed_updates=["message", "channel_post", "callback_query"])
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
