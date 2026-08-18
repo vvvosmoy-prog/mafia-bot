@@ -5,9 +5,8 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
-    CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
+    TypeHandler,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -30,7 +29,6 @@ def run_flask():
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DEFAULT_THRESHOLD = 10
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
 # Хранилище активных сборов
 active_sessions = {}
@@ -68,92 +66,7 @@ def render_text(players: dict, threshold: int, closed: bool = False) -> str:
     return "\n".join(lines)
 
 
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    msg = update.effective_message
-    if not msg:
-        return False
-
-    if msg.sender_chat or msg.is_automatic_forward or update.effective_chat.type == "channel":
-        return True
-
-    user = update.effective_user
-    if not user:
-        return True
-
-    if user.id in (1087968824, 777000):
-        return True
-
-    if ADMIN_IDS and user.id in ADMIN_IDS:
-        return True
-
-    if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
-        try:
-            member = await context.bot.get_chat_member(
-                update.effective_chat.id, user.id
-            )
-            if member.status in ("administrator", "creator"):
-                return True
-        except Exception as e:
-            logger.error(f"Ошибка проверки прав: {e}")
-
-    if ADMIN_IDS:
-        return False
-
-    return True
-
-
-async def newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /newgame [число] — запускает новый сбор."""
-    msg = update.effective_message
-    if not msg:
-        return
-
-    # Игнорируем авто-дубликат, падающий в чат обсуждений из канала
-    if msg.is_automatic_forward:
-        return
-
-    if not await is_admin(update, context):
-        if update.message:
-            await update.message.reply_text("Эта команда только для админов.")
-        return
-
-    threshold = DEFAULT_THRESHOLD
-    if context.args:
-        try:
-            threshold = int(context.args[0])
-        except ValueError:
-            pass
-
-    players = {}
-    text = render_text(players, threshold)
-
-    try:
-        # Публикуем опросник прямо в место вызова (в Канал)
-        sent_msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=build_keyboard(),
-        )
-        active_sessions[sent_msg.message_id] = {
-            "chat_id": sent_msg.chat_id,
-            "players": players,
-            "threshold": threshold,
-            "closed": False,
-        }
-
-        # Если команда отправлена в канале, стираем текст /newgame
-        if update.effective_chat.type == "channel":
-            try:
-                await msg.delete()
-            except Exception as e:
-                logger.error(f"Не удалось удалить сообщение команды в канале: {e}")
-
-    except Exception as e:
-        logger.error(f"Ошибка отправки опросника: {e}")
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+async def button_handler(query):
     msg_id = query.message.message_id
     session = active_sessions.get(msg_id)
 
@@ -175,7 +88,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["closed"] = closed
 
     text = render_text(session["players"], session["threshold"], closed)
-    await context.bot.edit_message_text(
+    await query.bot.edit_message_text(
         chat_id=session["chat_id"],
         message_id=msg_id,
         text=text,
@@ -184,19 +97,75 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if closed:
         mentions = ", ".join(p["display"] for p in session["players"].values())
-        await context.bot.send_message(
+        await query.bot.send_message(
             chat_id=session["chat_id"],
             text=f"🚨 Собралось {session['threshold']} человек! Го в лобби: {mentions}",
         )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        await update.message.reply_text(
-            "Привет! Я бот для сбора игроков в мафию.\n\n"
-            "Команда /newgame — запустить новый сбор (по умолчанию порог 10 человек).\n"
-            "Пример: /newgame 8 — запустить сбор на 8 человек."
+async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Нажатие на кнопки
+    if update.callback_query:
+        await button_handler(update.callback_query)
+        return
+
+    # 2. Перехватываем сообщение из группы или публикацию из канала
+    msg = update.channel_post or update.message
+    if not msg or not msg.text:
+        return
+
+    # Игнорируем авто-дубликат поста, который Telegram шлёт в чат
+    if msg.is_automatic_forward:
+        return
+
+    text = msg.text.strip()
+
+    # Команда /start
+    if text.startswith("/start"):
+        await context.bot.send_message(
+            chat_id=msg.chat_id,
+            text="Привет! Я бот для сбора игроков в мафию.\n\n"
+                 "Команда /newgame — запустить новый сбор (по умолчанию 10 человек).\n"
+                 "Пример: /newgame 8 — запустить сбор на 8 человек.",
         )
+        return
+
+    # Команда /newgame
+    if text.startswith("/newgame"):
+        parts = text.split()
+        threshold = DEFAULT_THRESHOLD
+        if len(parts) > 1:
+            try:
+                threshold = int(parts[1])
+            except ValueError:
+                pass
+
+        players = {}
+        rendered_text = render_text(players, threshold)
+
+        try:
+            # Публикуем интерактивную карточку в Канал
+            sent_msg = await context.bot.send_message(
+                chat_id=msg.chat_id,
+                text=rendered_text,
+                reply_markup=build_keyboard(),
+            )
+            active_sessions[sent_msg.message_id] = {
+                "chat_id": sent_msg.chat_id,
+                "players": players,
+                "threshold": threshold,
+                "closed": False,
+            }
+
+            # Если команда отправлена в канале — сразу удаляем текст /newgame
+            if msg.chat.type == "channel":
+                try:
+                    await msg.delete()
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить команду из канала: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке /newgame: {e}")
 
 
 def main():
@@ -207,9 +176,8 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("newgame", newgame))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    # Перехватчик всех типов сообщений и постов каналов без потерь
+    app.add_handler(TypeHandler(Update, handle_update))
 
     logger.info("Бот запущен")
     app.run_polling(allowed_updates=["message", "channel_post", "callback_query"])
