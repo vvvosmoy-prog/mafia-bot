@@ -182,20 +182,15 @@ def main():
 
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Разрешаем обработку сообщений из каналов, обычных чатов и нажатий на кнопки
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .allowed_updates(["message", "channel_post", "callback_query"])
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newgame", newgame))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Бот запущен")
-    app.run_polling()
+    # Передаем типы сообщений напрямую в run_polling:
+    app.run_polling(allowed_updates=["message", "channel_post", "callback_query"])
 
 
 if __name__ == "__main__":
